@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { MouseEvent } from "react";
 import type { TFunction } from "i18next";
 import { useTranslation } from "react-i18next";
@@ -8,6 +8,7 @@ import { AboutPanel } from "./AboutPanel";
 import { exportMarkdownNote, importMarkdownNote } from "../features/importExport/api";
 import { MarkdownPreview } from "../features/markdown/MarkdownPreview";
 import { showToast } from "./Toast";
+import { tagPreviewBlocks } from "../features/markdown/scrollSync";
 import {
   chooseNotesDirectory,
   getConfig,
@@ -347,6 +348,8 @@ export function MainWindow({
   const [categoryMenuConfirmDelete, setCategoryMenuConfirmDelete] = useState(false);
   const contentRef = useRef<HTMLTextAreaElement>(null);
   const windowLabelRef = useRef("main");
+  const previewScrollRef = useRef<HTMLDivElement>(null);
+  const isScrollSyncing = useRef(false);
   const externalFileMtimeRef = useRef<number>(0);
   const lastExternalSaveRef = useRef<number>(0);
   const imageBaseDir = useImageBaseDir();
@@ -1496,6 +1499,71 @@ export function MainWindow({
     };
   }, [isResizingSplit]);
 
+  // Tag rendered preview blocks with data-block-index after each render
+  useLayoutEffect(() => {
+    if (viewMode !== "split") return;
+    const container = previewScrollRef.current;
+    if (!container) return;
+    tagPreviewBlocks(container);
+  }, [content, viewMode]);
+
+  // Reset preview scroll on note switch
+  useEffect(() => {
+    if (previewScrollRef.current) {
+      previewScrollRef.current.scrollTop = 0;
+    }
+  }, [selectedId]);
+
+  const handleEditorScroll = useCallback(() => {
+    if (viewMode !== "split" || isScrollSyncing.current) return;
+    const textarea = contentRef.current;
+    const preview = previewScrollRef.current;
+    if (!textarea || !preview) return;
+
+    const maxScroll = textarea.scrollHeight - textarea.clientHeight;
+    if (maxScroll <= 0) return;
+    const ratio = Math.min(textarea.scrollTop / maxScroll, 1);
+
+    const elements = preview.querySelectorAll<HTMLElement>("[data-block-index]");
+    if (elements.length === 0) return;
+
+    const targetIdx = Math.min(Math.floor(ratio * elements.length), elements.length - 1);
+    const el = elements[targetIdx];
+    if (!el) return;
+
+    isScrollSyncing.current = true;
+    el.scrollIntoView({ block: "start", behavior: "instant" });
+    isScrollSyncing.current = false;
+  }, [viewMode]);
+
+  const handlePreviewScroll = useCallback(() => {
+    if (viewMode !== "split" || isScrollSyncing.current) return;
+    const textarea = contentRef.current;
+    const preview = previewScrollRef.current;
+    if (!textarea || !preview) return;
+
+    const elements = preview.querySelectorAll<HTMLElement>("[data-block-index]");
+    if (elements.length === 0) return;
+
+    const containerRect = preview.getBoundingClientRect();
+    let topDomIndex = 0;
+    for (const el of elements) {
+      const rect = el.getBoundingClientRect();
+      if (rect.bottom > containerRect.top + 1) {
+        topDomIndex = parseInt(el.getAttribute("data-block-index")!, 10);
+        break;
+      }
+    }
+
+    const ratio = topDomIndex / (elements.length - 1 || 1);
+    const maxScroll = textarea.scrollHeight - textarea.clientHeight;
+    if (maxScroll <= 0) return;
+
+    isScrollSyncing.current = true;
+    textarea.scrollTop = ratio * maxScroll;
+    isScrollSyncing.current = false;
+  }, [viewMode]);
+
   const handlePinEntry = async () => {
     if (!selectedId) return;
     const isPinned = pinnedTileIds.has(selectedId);
@@ -2537,6 +2605,7 @@ export function MainWindow({
                           onPaste={imagePasteHandler}
                           onDrop={imageDropHandler}
                           onDragOver={imageDragOverHandler}
+                          onScroll={handleEditorScroll}
                           className="w-full h-full leading-[1.9] text-ink-soft font-body placeholder:text-ink-ghost/40"
                           style={{
                             fontSize: `${settingsConfig?.fontSize ?? 14}px`,
@@ -2582,6 +2651,8 @@ export function MainWindow({
                         </div>
                       )}
                       <div
+                        ref={previewScrollRef}
+                        onScroll={handlePreviewScroll}
                         className={`flex-1 overflow-y-auto px-6 pb-6 ${
                           viewMode === "preview" ? "pt-3" : "pt-1"
                         }`}
