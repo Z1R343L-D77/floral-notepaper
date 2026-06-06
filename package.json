@@ -5,12 +5,13 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc && vite build",
+    "build": "node scripts/fetch-contributors.mjs && tsc && vite build",
     "test": "vitest run",
     "lint": "oxlint",
     "fmt": "oxfmt",
     "preview": "vite preview",
     "tauri": "tauri",
+    "version:sync": "node scripts/set-version.mjs",
     "prepare": "husky"
   },
   "dependencies": {
