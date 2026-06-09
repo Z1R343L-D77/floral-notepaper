@@ -25,7 +25,8 @@ const MACOS_SHORTCUT_MIGRATION_MARKER: &str = ".macos-shortcut-default-v3";
 pub struct AppConfig {
     #[serde(default = "default_locale")]
     pub locale: String,
-    pub notes_dir: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data_dir: Option<String>,
     pub global_shortcut: String,
     pub close_to_tray: bool,
     pub autostart: bool,
@@ -76,10 +77,13 @@ pub struct AppConfig {
     pub surface_height: Option<u32>,
     #[serde(default = "default_toggle_visibility_shortcut")]
     pub toggle_visibility_shortcut: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_known_base_dir: Option<String>,
     #[serde(default = "default_open_at_cursor")]
     pub open_at_cursor: bool,
+    // Legacy fields — read from old config, never written back
+    #[serde(default, skip_serializing)]
+    pub notes_dir: Option<String>,
+    #[serde(default, skip_serializing)]
+    pub last_known_base_dir: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -202,14 +206,30 @@ struct MetadataFile {
 
 #[derive(Debug, Clone)]
 pub struct NoteStore {
-    base_dir: PathBuf,
+    config_dir: PathBuf,
+    data_dir: PathBuf,
 }
 
 pub fn default_store() -> Result<NoteStore, AppError> {
-    Ok(NoteStore::new(default_base_dir()?))
+    let config_dir = default_config_dir()?;
+    let data_dir = resolve_data_dir(&config_dir)?;
+    Ok(NoteStore::new(config_dir, data_dir))
 }
 
-fn default_base_dir() -> Result<PathBuf, AppError> {
+pub(crate) fn default_config_dir() -> Result<PathBuf, AppError> {
+    if let Ok(path) = env::var("FLORAL_NOTEPAPER_CONFIG_DIR") {
+        let trimmed = path.trim();
+        if !trimmed.is_empty() {
+            return Ok(PathBuf::from(trimmed));
+        }
+    }
+    if let Some(dir) = dirs::config_dir() {
+        return Ok(dir.join("floral-notepaper"));
+    }
+    Ok(env::current_dir()?.join("floral-notepaper"))
+}
+
+fn default_data_dir() -> Result<PathBuf, AppError> {
     if let Ok(path) = env::var("FLORAL_NOTEPAPER_DATA_DIR") {
         let trimmed = path.trim();
         if !trimmed.is_empty() {
@@ -227,6 +247,41 @@ fn default_base_dir() -> Result<PathBuf, AppError> {
     }
 
     Ok(env::current_dir()?.join("data"))
+}
+
+fn resolve_data_dir(config_dir: &Path) -> Result<PathBuf, AppError> {
+    if let Ok(path) = env::var("FLORAL_NOTEPAPER_DATA_DIR") {
+        let trimmed = path.trim();
+        if !trimmed.is_empty() {
+            return Ok(PathBuf::from(trimmed));
+        }
+    }
+    let config_path = config_dir.join("config.json");
+    if config_path.exists() {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct PartialConfig {
+            data_dir: Option<String>,
+            notes_dir: Option<String>,
+        }
+        if let Ok(content) = fs::read_to_string(&config_path) {
+            if let Ok(partial) = serde_json::from_str::<PartialConfig>(&content) {
+                if let Some(ref data_dir) = partial.data_dir {
+                    return Ok(PathBuf::from(data_dir));
+                }
+                if let Some(ref notes_dir) = partial.notes_dir {
+                    let path = Path::new(notes_dir);
+                    if path.file_name().and_then(|n| n.to_str()) == Some("notes") {
+                        if let Some(parent) = path.parent() {
+                            return Ok(parent.to_path_buf());
+                        }
+                    }
+                    return Ok(path.to_path_buf());
+                }
+            }
+        }
+    }
+    default_data_dir()
 }
 
 fn known_data_migration_candidates() -> Vec<PathBuf> {
@@ -298,19 +353,11 @@ fn is_filesystem_root(path: &Path) -> bool {
     false
 }
 
-fn ensure_notes_suffix(dir: &str) -> String {
-    let path = Path::new(dir);
-    if path.file_name().and_then(|n| n.to_str()) == Some("notes") {
-        return dir.to_string();
-    }
-    path.join("notes").to_string_lossy().to_string()
-}
-
-fn is_safe_notes_dir(path: &Path) -> Result<(), AppError> {
+fn is_safe_data_dir(path: &Path) -> Result<(), AppError> {
     if is_filesystem_root(path) {
         return Err(AppError::new(
             "unsafePath",
-            "不能将磁盘根目录设为笔记目录，请选择一个子文件夹",
+            "不能将磁盘根目录设为数据目录，请选择一个子文件夹",
         ));
     }
 
@@ -326,12 +373,11 @@ fn is_safe_notes_dir(path: &Path) -> Result<(), AppError> {
         if normalized.ends_with(suffix) {
             return Err(AppError::new(
                 "unsafePath",
-                format!("不能将系统目录「{}」设为笔记目录", path.display()),
+                format!("不能将系统目录「{}」设为数据目录", path.display()),
             ));
         }
     }
 
-    // Must have at least 2 real path components (e.g. D:\Something, not just D:\)
     let real_components = path
         .components()
         .filter(|c| matches!(c, Component::Normal(_)))
@@ -339,7 +385,7 @@ fn is_safe_notes_dir(path: &Path) -> Result<(), AppError> {
     if real_components == 0 {
         return Err(AppError::new(
             "unsafePath",
-            "笔记目录路径不合法，请选择一个具体的文件夹",
+            "数据目录路径不合法，请选择一个具体的文件夹",
         ));
     }
 
@@ -347,32 +393,39 @@ fn is_safe_notes_dir(path: &Path) -> Result<(), AppError> {
 }
 
 impl NoteStore {
-    pub fn new(base_dir: PathBuf) -> Self {
-        Self { base_dir }
+    pub fn new(config_dir: PathBuf, data_dir: PathBuf) -> Self {
+        Self {
+            config_dir,
+            data_dir,
+        }
     }
 
-    pub fn base_dir(&self) -> &Path {
-        &self.base_dir
+    pub fn data_dir(&self) -> &Path {
+        &self.data_dir
+    }
+
+    pub fn config_dir(&self) -> &Path {
+        &self.config_dir
     }
 
     pub fn metadata_path(&self) -> PathBuf {
-        self.base_dir.join("metadata.json")
+        self.data_dir.join("metadata.json")
     }
 
     pub fn config_path(&self) -> PathBuf {
-        self.base_dir.join("config.json")
+        self.config_dir.join("config.json")
     }
 
     #[cfg(target_os = "macos")]
     fn macos_shortcut_migration_path(&self) -> PathBuf {
-        self.base_dir.join(MACOS_SHORTCUT_MIGRATION_MARKER)
+        self.config_dir.join(MACOS_SHORTCUT_MIGRATION_MARKER)
     }
 
     pub fn load_config(&self) -> Result<AppConfig, AppError> {
-        self.ensure_base_dir()?;
+        self.ensure_config_dir()?;
         let path = self.config_path();
-        if !path.exists() && self.is_default_base_dir() {
-            self.migrate_from_known_locations()?;
+        if !path.exists() {
+            self.migrate_config_from_legacy()?;
         }
         if !path.exists() {
             let config = self.default_config();
@@ -382,13 +435,10 @@ impl NoteStore {
         }
 
         let mut config: AppConfig = serde_json::from_str(&fs::read_to_string(&path)?)?;
-        self.migrate_base_dir_if_changed(&mut config)?;
-        if is_safe_notes_dir(Path::new(&config.notes_dir)).is_err() {
-            config.notes_dir = self.default_config().notes_dir;
-        }
-        config.last_known_base_dir = Some(self.base_dir.to_string_lossy().to_string());
+        config.data_dir = Some(self.data_dir.to_string_lossy().to_string());
+        config.tab_indent_size = config.tab_indent_size.clamp(1, 8);
         write_json_atomic(&path, &config)?;
-        fs::create_dir_all(&config.notes_dir)?;
+        fs::create_dir_all(self.data_dir.join("notes"))?;
         if self.migrate_macos_shortcut_default(&mut config)? {
             write_json_atomic(&path, &config)?;
         }
@@ -396,11 +446,11 @@ impl NoteStore {
     }
 
     pub fn save_config(&self, mut config: AppConfig) -> Result<AppConfig, AppError> {
-        self.ensure_base_dir()?;
-        config.notes_dir = ensure_notes_suffix(&config.notes_dir);
+        self.ensure_config_dir()?;
+        config.data_dir = Some(self.data_dir.to_string_lossy().to_string());
         config.tab_indent_size = config.tab_indent_size.clamp(1, 8);
-        is_safe_notes_dir(Path::new(&config.notes_dir))?;
-        fs::create_dir_all(&config.notes_dir)?;
+        is_safe_data_dir(&self.data_dir)?;
+        fs::create_dir_all(self.data_dir.join("notes"))?;
         write_json_atomic(&self.config_path(), &config)?;
         Ok(config)
     }
@@ -545,7 +595,7 @@ impl NoteStore {
     }
 
     pub fn images_dir(&self, note_id: &str) -> PathBuf {
-        self.base_dir.join("images").join(note_id)
+        self.data_dir.join("images").join(note_id)
     }
 
     pub fn save_image(
@@ -642,7 +692,7 @@ impl NoteStore {
     }
 
     pub fn list_categories(&self) -> Result<Vec<String>, AppError> {
-        let notes_dir = self.notes_dir()?;
+        let notes_dir = self.notes_dir();
         fs::create_dir_all(&notes_dir)?;
         let mut categories = Vec::new();
         for entry in fs::read_dir(&notes_dir)? {
@@ -663,7 +713,7 @@ impl NoteStore {
         if name.contains('/') || name.contains('\\') || name.contains(':') || name.contains("..") {
             return Err(AppError::category_name_invalid_chars());
         }
-        let notes_dir = self.notes_dir()?;
+        let notes_dir = self.notes_dir();
         let path = notes_dir.join(name);
         fs::create_dir_all(&path)?;
         Ok(())
@@ -681,7 +731,7 @@ impl NoteStore {
         {
             return Err(AppError::category_name_invalid_chars());
         }
-        let notes_dir = self.notes_dir()?;
+        let notes_dir = self.notes_dir();
         let old_path = notes_dir.join(old_name);
         let new_path = notes_dir.join(new_name);
         if !old_path.exists() {
@@ -703,7 +753,7 @@ impl NoteStore {
     }
 
     pub fn delete_category(&self, name: &str) -> Result<(), AppError> {
-        let notes_dir = self.notes_dir()?;
+        let notes_dir = self.notes_dir();
         let category_path = notes_dir.join(name);
         let dir_exists = category_path.exists();
 
@@ -716,7 +766,7 @@ impl NoteStore {
                 return Err(AppError::new(
                     "unsafePath",
                     format!(
-                        "拒绝删除「{}」：路径不在笔记目录内",
+                        "拒绝删除「{}」：路径不在数据目录内",
                         category_path.display()
                     ),
                 ));
@@ -793,7 +843,7 @@ impl NoteStore {
     fn default_config(&self) -> AppConfig {
         AppConfig {
             locale: default_locale(),
-            notes_dir: self.base_dir.join("notes").to_string_lossy().to_string(),
+            data_dir: Some(self.data_dir.to_string_lossy().to_string()),
             #[cfg(target_os = "macos")]
             global_shortcut: DEFAULT_MACOS_GLOBAL_SHORTCUT.into(),
             #[cfg(not(target_os = "macos"))]
@@ -824,78 +874,52 @@ impl NoteStore {
             surface_width: None,
             surface_height: None,
             toggle_visibility_shortcut: default_toggle_visibility_shortcut(),
-            last_known_base_dir: Some(self.base_dir.to_string_lossy().to_string()),
             open_at_cursor: default_open_at_cursor(),
+            notes_dir: None,
+            last_known_base_dir: None,
         }
     }
 
-    fn migrate_from_known_locations(&self) -> Result<(), AppError> {
-        let current = &self.base_dir;
-        if current.join("config.json").exists() {
+    fn migrate_config_from_legacy(&self) -> Result<(), AppError> {
+        if self.config_path().exists() {
             return Ok(());
         }
         for old_dir in known_data_migration_candidates() {
-            if old_dir != *current && old_dir.join("config.json").exists() {
-                eprintln!(
-                    "migrating data from {} to {}",
-                    old_dir.display(),
-                    current.display()
-                );
-                return move_or_copy_dir(&old_dir, current);
+            let old_config = old_dir.join("config.json");
+            if !old_config.exists() {
+                continue;
             }
+            eprintln!(
+                "migrating config from {} to {}",
+                old_dir.display(),
+                self.config_dir.display()
+            );
+            let old_str = fs::read_to_string(&old_config)?;
+            let mut config: AppConfig = serde_json::from_str(&old_str)?;
+            config.data_dir = Some(old_dir.to_string_lossy().to_string());
+            config.notes_dir = None;
+            config.last_known_base_dir = None;
+            fs::create_dir_all(&self.config_dir)?;
+            write_json_atomic(&self.config_path(), &config)?;
+            let marker = old_dir.join(MACOS_SHORTCUT_MIGRATION_MARKER);
+            if marker.exists() {
+                let _ = fs::copy(
+                    &marker,
+                    self.config_dir.join(MACOS_SHORTCUT_MIGRATION_MARKER),
+                );
+            }
+            return Ok(());
         }
         Ok(())
     }
 
-    fn is_default_base_dir(&self) -> bool {
-        default_base_dir()
-            .map(|default_dir| default_dir == self.base_dir)
-            .unwrap_or(false)
+    fn ensure_config_dir(&self) -> Result<(), AppError> {
+        fs::create_dir_all(&self.config_dir)?;
+        Ok(())
     }
 
-    fn migrate_base_dir_if_changed(&self, config: &mut AppConfig) -> Result<(), AppError> {
-        let Some(ref last_known) = config.last_known_base_dir else {
-            return Ok(());
-        };
-        if Path::new(last_known.as_str()) == self.base_dir.as_path() {
-            return Ok(());
-        }
-        let old_dir = Path::new(last_known);
-        if !old_dir.exists() {
-            return Ok(());
-        }
-        if self.base_dir_has_user_data()? {
-            return Ok(());
-        }
-        eprintln!(
-            "migrating data from {last_known} to {}",
-            self.base_dir.display()
-        );
-        move_or_copy_dir(old_dir, &self.base_dir)
-    }
-
-    fn base_dir_has_user_data(&self) -> Result<bool, AppError> {
-        if !self.base_dir.exists() {
-            return Ok(false);
-        }
-
-        for entry in fs::read_dir(&self.base_dir)? {
-            let entry = entry?;
-            let file_name = entry.file_name();
-            let Some(name) = file_name.to_str() else {
-                return Ok(true);
-            };
-            if name == "config.json" || name == MACOS_SHORTCUT_MIGRATION_MARKER {
-                continue;
-            }
-            return Ok(true);
-        }
-
-        Ok(false)
-    }
-
-    fn ensure_base_dir(&self) -> Result<(), AppError> {
-        fs::create_dir_all(&self.base_dir)?;
+    fn ensure_data_dir(&self) -> Result<(), AppError> {
+        fs::create_dir_all(&self.data_dir)?;
         Ok(())
     }
 
@@ -934,23 +958,28 @@ impl NoteStore {
     }
 
     fn ensure_storage(&self) -> Result<(), AppError> {
-        self.ensure_base_dir()?;
-        let config = self.load_config()?;
-        fs::create_dir_all(&config.notes_dir)?;
+        self.ensure_data_dir()?;
+        let _config = self.load_config()?;
+        fs::create_dir_all(self.notes_dir())?;
         if !self.metadata_path().exists() {
-            self.save_metadata(&MetadataFile::default())?;
+            let metadata = self.rebuild_metadata()?;
+            self.save_metadata(&metadata)?;
+        } else {
+            let metadata = self.load_metadata()?;
+            if metadata.notes.is_empty() && self.notes_dir_has_md_files() {
+                let rebuilt = self.rebuild_metadata()?;
+                self.save_metadata(&rebuilt)?;
+            }
         }
         Ok(())
     }
 
-    fn notes_dir(&self) -> Result<PathBuf, AppError> {
-        Ok(PathBuf::from(self.load_config()?.notes_dir))
+    fn notes_dir(&self) -> PathBuf {
+        self.data_dir.join("notes")
     }
 
     fn note_path_in_category(&self, file_name: &str, category: &str) -> PathBuf {
-        let notes_dir = self
-            .notes_dir()
-            .unwrap_or_else(|_| self.base_dir.join("notes"));
+        let notes_dir = self.notes_dir();
         if category.is_empty() {
             notes_dir.join(file_name)
         } else {
@@ -976,7 +1005,7 @@ impl NoteStore {
     }
 
     fn load_metadata(&self) -> Result<MetadataFile, AppError> {
-        self.ensure_base_dir()?;
+        self.ensure_data_dir()?;
         let path = self.metadata_path();
         if !path.exists() {
             let rebuilt = self.rebuild_metadata()?;
@@ -986,27 +1015,31 @@ impl NoteStore {
 
         match serde_json::from_str(&fs::read_to_string(&path)?) {
             Ok(metadata) => Ok(metadata),
-            Err(error) => {
-                let corrupt_name = format!(
-                    "metadata.corrupt-{}.json",
-                    Utc::now().format("%Y%m%d%H%M%S")
-                );
-                fs::rename(&path, self.base_dir.join(corrupt_name))?;
+            Err(_) => {
                 let rebuilt = self.rebuild_metadata()?;
                 self.save_metadata(&rebuilt)?;
-                let _ = error;
                 Ok(rebuilt)
             }
         }
     }
 
     fn save_metadata(&self, metadata: &MetadataFile) -> Result<(), AppError> {
-        self.ensure_base_dir()?;
+        self.ensure_data_dir()?;
         write_json_atomic(&self.metadata_path(), metadata)
     }
 
+    fn notes_dir_has_md_files(&self) -> bool {
+        let notes_dir = self.notes_dir();
+        let Ok(entries) = fs::read_dir(&notes_dir) else {
+            return false;
+        };
+        entries
+            .filter_map(|e| e.ok())
+            .any(|e| e.path().extension().and_then(|ext| ext.to_str()) == Some("md"))
+    }
+
     fn rebuild_metadata(&self) -> Result<MetadataFile, AppError> {
-        let notes_dir = self.notes_dir()?;
+        let notes_dir = self.notes_dir();
         fs::create_dir_all(&notes_dir)?;
         let mut notes = Vec::new();
 
@@ -1061,6 +1094,45 @@ impl NoteStore {
             });
         }
         Ok(())
+    }
+
+    pub fn migrate_data_to(&self, new_data_dir: &Path) -> Result<NoteStore, AppError> {
+        is_safe_data_dir(new_data_dir)?;
+        if new_data_dir == self.data_dir {
+            return Ok(self.clone());
+        }
+        fs::create_dir_all(new_data_dir)?;
+
+        fn move_item(src: &Path, dst: &Path) -> Result<(), AppError> {
+            if src.is_dir() {
+                move_or_copy_dir(src, dst)
+            } else if src.is_file() {
+                if let Some(parent) = dst.parent() {
+                    fs::create_dir_all(parent)?;
+                }
+                if fs::rename(src, dst).is_err() {
+                    fs::copy(src, dst)?;
+                    fs::remove_file(src)?;
+                }
+                Ok(())
+            } else {
+                Ok(())
+            }
+        }
+
+        for item in ["metadata.json", "notes", "images", "backgrounds"] {
+            let src = self.data_dir.join(item);
+            let dst = new_data_dir.join(item);
+            if src.exists() {
+                move_item(&src, &dst)?;
+            }
+        }
+
+        let new_store = NoteStore::new(self.config_dir.clone(), new_data_dir.to_path_buf());
+        let mut config = new_store.load_config()?;
+        config.data_dir = Some(new_data_dir.to_string_lossy().to_string());
+        new_store.save_config(config)?;
+        Ok(new_store)
     }
 }
 
@@ -1262,9 +1334,14 @@ mod tests {
         root
     }
 
+    fn test_store(name: &str) -> NoteStore {
+        let root = test_root(name);
+        NoteStore::new(root.clone(), root)
+    }
+
     #[test]
     fn creates_updates_reads_and_deletes_markdown_notes() {
-        let store = NoteStore::new(test_root("crud"));
+        let store = test_store("crud");
 
         let created = store
             .create_note(SaveNoteRequest {
@@ -1310,7 +1387,7 @@ mod tests {
 
     #[test]
     fn rebuilds_metadata_when_metadata_json_is_corrupt() {
-        let store = NoteStore::new(test_root("repair"));
+        let store = test_store("repair");
         let first = store
             .create_note(SaveNoteRequest {
                 title: "第一条".into(),
@@ -1334,20 +1411,14 @@ mod tests {
         assert_eq!(repaired.len(), 2);
         assert!(ids.contains(&first.id.as_str()));
         assert!(ids.contains(&second.id.as_str()));
-        assert!(store
-            .base_dir()
-            .read_dir()
-            .expect("read base dir")
-            .any(|entry| entry
-                .expect("entry")
-                .file_name()
-                .to_string_lossy()
-                .starts_with("metadata.corrupt-")));
     }
 
     #[test]
     fn reads_and_writes_config_json() {
-        let store = NoteStore::new(test_root("config"));
+        let store = test_store("config");
+        fs::create_dir_all(store.config_dir.as_path()).expect("create config dir");
+        write_json_atomic(&store.config_path(), &store.default_config())
+            .expect("write default config");
 
         let default_config = store.load_config().expect("load default config");
         #[cfg(target_os = "macos")]
@@ -1360,12 +1431,14 @@ mod tests {
         assert_eq!(default_config.tile_color_mode, "system");
         assert_eq!(default_config.theme, "system");
         assert_eq!(default_config.locale, "zh-CN");
-        assert!(default_config.notes_dir.ends_with("notes"));
+        assert_eq!(
+            default_config.data_dir.as_deref(),
+            Some(store.data_dir().to_string_lossy().as_ref())
+        );
 
-        let custom_notes_dir = store.base_dir().join("custom-notes");
         let mut saved = AppConfig {
             locale: "en-US".into(),
-            notes_dir: custom_notes_dir.join("notes").to_string_lossy().to_string(),
+            data_dir: None,
             global_shortcut: "Alt+Space".into(),
             close_to_tray: false,
             autostart: true,
@@ -1393,6 +1466,7 @@ mod tests {
             surface_width: None,
             surface_height: None,
             toggle_visibility_shortcut: String::new(),
+            notes_dir: None,
             last_known_base_dir: None,
             open_at_cursor: true,
         };
@@ -1400,9 +1474,8 @@ mod tests {
         store.save_config(saved.clone()).expect("save config");
 
         let loaded = store.load_config().expect("reload config");
-        saved.last_known_base_dir = Some(store.base_dir().to_string_lossy().to_string());
+        saved.data_dir = Some(store.data_dir().to_string_lossy().to_string());
         assert_eq!(loaded, saved);
-        assert!(custom_notes_dir.exists());
     }
 
     #[test]
@@ -1427,59 +1500,9 @@ mod tests {
     }
 
     #[test]
-    fn migrates_last_known_base_dir_when_current_dir_only_has_config() {
-        let root = test_root("last-known-base-dir-migration");
-        let old_store = NoteStore::new(root.join("old"));
-        fs::create_dir_all(old_store.base_dir()).expect("create old base");
-        fs::write(old_store.metadata_path(), r#"{"notes":[]}"#).expect("write old metadata");
-        fs::write(old_store.base_dir().join("legacy.txt"), "legacy").expect("write legacy file");
-
-        let new_store = NoteStore::new(root.join("new"));
-        fs::create_dir_all(new_store.base_dir()).expect("create new base");
-        let mut config = new_store.default_config();
-        config.last_known_base_dir = Some(old_store.base_dir().to_string_lossy().to_string());
-        write_json_atomic(&new_store.config_path(), &config).expect("write copied config");
-
-        let loaded = new_store.load_config().expect("load copied config");
-
-        assert_eq!(
-            loaded.last_known_base_dir.as_deref(),
-            Some(new_store.base_dir().to_string_lossy().as_ref())
-        );
-        assert_eq!(
-            fs::read_to_string(new_store.base_dir().join("legacy.txt"))
-                .expect("read migrated legacy file"),
-            "legacy"
-        );
-        assert!(new_store.metadata_path().exists());
-        assert!(!old_store.base_dir().exists());
-    }
-
-    #[test]
-    fn does_not_merge_last_known_base_dir_into_non_empty_current_dir() {
-        let root = test_root("last-known-base-dir-non-empty");
-        let old_store = NoteStore::new(root.join("old"));
-        fs::create_dir_all(old_store.base_dir()).expect("create old base");
-        fs::write(old_store.base_dir().join("legacy.txt"), "legacy").expect("write legacy file");
-
-        let new_store = NoteStore::new(root.join("new"));
-        fs::create_dir_all(new_store.base_dir()).expect("create new base");
-        fs::write(new_store.metadata_path(), r#"{"notes":[]}"#).expect("write current metadata");
-        let mut config = new_store.default_config();
-        config.last_known_base_dir = Some(old_store.base_dir().to_string_lossy().to_string());
-        write_json_atomic(&new_store.config_path(), &config).expect("write copied config");
-
-        new_store.load_config().expect("load copied config");
-
-        assert!(old_store.base_dir().exists());
-        assert!(!new_store.base_dir().join("legacy.txt").exists());
-        assert!(new_store.metadata_path().exists());
-    }
-
-    #[test]
     fn loads_legacy_config_with_note_surface_auto_save_enabled() {
-        let store = NoteStore::new(test_root("legacy-config"));
-        let notes_dir = store.base_dir().join("notes");
+        let store = test_store("legacy-config");
+        let notes_dir = store.data_dir().join("notes");
         fs::create_dir_all(&notes_dir).expect("create notes dir");
         fs::write(
             store.config_path(),
@@ -1511,9 +1534,9 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn migrates_legacy_macos_shortcut_default_once() {
-        let store = NoteStore::new(test_root("legacy-macos-shortcut"));
-        let notes_dir = store.base_dir().join("notes");
-        fs::create_dir_all(store.base_dir()).expect("create base dir");
+        let store = test_store("legacy-macos-shortcut");
+        let notes_dir = store.data_dir().join("notes");
+        fs::create_dir_all(store.data_dir()).expect("create base dir");
         fs::create_dir_all(&notes_dir).expect("create notes dir");
         fs::write(
             store.config_path(),
@@ -1548,9 +1571,9 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn migrates_previous_macos_shortcut_default() {
-        let store = NoteStore::new(test_root("previous-macos-shortcut"));
-        let notes_dir = store.base_dir().join("notes");
-        fs::create_dir_all(store.base_dir()).expect("create base dir");
+        let store = test_store("previous-macos-shortcut");
+        let notes_dir = store.data_dir().join("notes");
+        fs::create_dir_all(store.data_dir()).expect("create base dir");
         fs::create_dir_all(&notes_dir).expect("create notes dir");
         fs::write(
             store.config_path(),
@@ -1576,9 +1599,9 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn leaves_custom_macos_shortcut_unchanged() {
-        let store = NoteStore::new(test_root("custom-macos-shortcut"));
-        let notes_dir = store.base_dir().join("notes");
-        fs::create_dir_all(store.base_dir()).expect("create base dir");
+        let store = test_store("custom-macos-shortcut");
+        let notes_dir = store.data_dir().join("notes");
+        fs::create_dir_all(store.data_dir()).expect("create base dir");
         fs::create_dir_all(&notes_dir).expect("create notes dir");
         fs::write(
             store.config_path(),
@@ -1607,7 +1630,8 @@ mod tests {
         let source_path = root.join("外部文件.md");
         let source_content = "# 导入标题\n正文第一行\n正文第二行";
         fs::write(&source_path, source_content).expect("write source markdown");
-        let store = NoteStore::new(root.join("store"));
+        let store_path = root.join("store");
+        let store = NoteStore::new(store_path.clone(), store_path);
 
         let imported = store
             .import_markdown_file(&source_path, "")
@@ -1630,7 +1654,8 @@ mod tests {
         let source_path = root.join("会议记录.md");
         let source_content = "正文第一行\n# 不是第一行标题";
         fs::write(&source_path, source_content).expect("write source markdown");
-        let store = NoteStore::new(root.join("store"));
+        let store_path = root.join("store");
+        let store = NoteStore::new(store_path.clone(), store_path);
 
         let imported = store
             .import_markdown_file(&source_path, "")
@@ -1643,7 +1668,8 @@ mod tests {
     #[test]
     fn exports_markdown_file_without_rewriting_content() {
         let root = test_root("export-markdown");
-        let store = NoteStore::new(root.join("store"));
+        let store_path = root.join("store");
+        let store = NoteStore::new(store_path.clone(), store_path);
         let content = "# 原始标题\n正文\n- 列表";
         let note = store
             .create_note(SaveNoteRequest {

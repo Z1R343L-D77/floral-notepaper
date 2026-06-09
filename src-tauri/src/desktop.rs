@@ -2513,7 +2513,7 @@ mod tests {
     fn test_app_config(global_shortcut: &str, toggle_visibility_shortcut: &str) -> AppConfig {
         AppConfig {
             locale: "zh-CN".into(),
-            notes_dir: "D:\\notes".into(),
+            data_dir: Some("D:\\notes".into()),
             global_shortcut: global_shortcut.into(),
             close_to_tray: true,
             autostart: false,
@@ -2542,6 +2542,7 @@ mod tests {
             surface_width: None,
             surface_height: None,
             toggle_visibility_shortcut: toggle_visibility_shortcut.into(),
+            notes_dir: None,
             last_known_base_dir: None,
         }
     }
@@ -2594,7 +2595,7 @@ mod tests {
     fn detects_runtime_config_changes() {
         let previous = AppConfig {
             locale: "zh-CN".into(),
-            notes_dir: "D:\\notes".into(),
+            data_dir: Some("D:\\notes".into()),
             global_shortcut: "Ctrl+Space".into(),
             close_to_tray: true,
             autostart: false,
@@ -2623,11 +2624,12 @@ mod tests {
             surface_width: None,
             surface_height: None,
             toggle_visibility_shortcut: String::new(),
+            notes_dir: None,
             last_known_base_dir: None,
         };
         let next = AppConfig {
             locale: "en-US".into(),
-            notes_dir: "D:\\other-notes".into(),
+            data_dir: Some("D:\\other-notes".into()),
             global_shortcut: "Alt+Space".into(),
             close_to_tray: false,
             autostart: true,
@@ -2656,6 +2658,7 @@ mod tests {
             surface_width: None,
             surface_height: None,
             toggle_visibility_shortcut: "Ctrl+Shift+H".into(),
+            notes_dir: None,
             last_known_base_dir: None,
         };
 

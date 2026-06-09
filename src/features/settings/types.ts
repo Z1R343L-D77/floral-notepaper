@@ -7,7 +7,7 @@ export type BackgroundFit = "cover" | "contain" | "repeat";
 
 export interface AppConfig {
   locale: string;
-  notesDir: string;
+  dataDir: string;
   globalShortcut: string;
   closeToTray: boolean;
   autostart: boolean;

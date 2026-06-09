@@ -27,11 +27,11 @@ const HARMONY_FONT_LICENSE_URL = new URL("../assets/fonts/LICENSE_Fonts", import
 interface SettingsPanelProps {
   config: AppConfig;
   onChange: (config: AppConfig) => void;
-  onChooseNotesDir: () => void;
+  onMigrateDataDir: () => void;
   onClose: () => void;
 }
 
-export function SettingsPanel({ config, onChange, onChooseNotesDir, onClose }: SettingsPanelProps) {
+export function SettingsPanel({ config, onChange, onMigrateDataDir, onClose }: SettingsPanelProps) {
   const { t } = useTranslation();
   const setConfigValue = <Key extends keyof AppConfig>(key: Key, value: AppConfig[Key]) => {
     onChange({ ...config, [key]: value });
@@ -132,18 +132,18 @@ export function SettingsPanel({ config, onChange, onChooseNotesDir, onClose }: S
 
         <section className="space-y-2">
           <label className="block text-[11px] font-body text-ink-faint">
-            {t("settings.notesDir", { defaultValue: "笔记目录" })}
+            {t("settings.dataDir", { defaultValue: "数据目录" })}
           </label>
           <div className="flex gap-2">
             <input
               type="text"
-              value={config.notesDir}
+              value={config.dataDir}
               readOnly
               className="min-w-0 flex-1 h-8 px-2.5 rounded-lg bg-paper-warm/70 border border-paper-deep/40 text-[11px] font-mono text-ink-faint truncate"
             />
             <button
               type="button"
-              onClick={onChooseNotesDir}
+              onClick={onMigrateDataDir}
               className="h-8 px-3 rounded-lg border border-paper-deep/45 text-[11px] text-ink-faint hover:text-bamboo hover:bg-bamboo-mist/50 transition-colors cursor-pointer"
             >
               {t("settings.selectFolder", { defaultValue: "选择文件夹" })}

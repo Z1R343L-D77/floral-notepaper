@@ -23,7 +23,7 @@ macro_rules! debug_log {
 }
 pub(super) use debug_log;
 
-use crate::services::notes::{default_store, AppError};
+use crate::services::notes::{default_config_dir, AppError};
 use std::{
     collections::{BTreeMap, BTreeSet},
     env, fs,
@@ -474,8 +474,8 @@ fn recover_mutex_guard<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 fn default_updates_dir() -> PathBuf {
-    if let Ok(store) = default_store() {
-        return store.base_dir().join("updates");
+    if let Ok(config_dir) = default_config_dir() {
+        return config_dir.join("updates");
     }
 
     env::current_dir()

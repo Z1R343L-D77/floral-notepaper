@@ -9,8 +9,9 @@ import { exportMarkdownNote, importMarkdownNote } from "../features/importExport
 import { MarkdownPreview } from "../features/markdown/MarkdownPreview";
 import { showToast } from "./Toast";
 import {
-  chooseNotesDirectory,
+  chooseDataDirectory,
   getConfig,
+  migrateDataDir,
   normalizeViewMode,
   saveConfig,
 } from "../features/settings/api";
@@ -320,9 +321,7 @@ export function MainWindow({
     createAboutUpdateReminderState(null),
   );
   const [settingsConfig, setSettingsConfig] = useState<AppConfig | null>(initialConfig ?? null);
-  const [savedNotesDir, setSavedNotesDir] = useState<string | null>(
-    initialConfig?.notesDir ?? null,
-  );
+  const [savedDataDir, setSavedDataDir] = useState<string | null>(initialConfig?.dataDir ?? null);
   const [noteTransitionKey, setNoteTransitionKey] = useState(0);
   const [deleteConfirm, setDeleteConfirm] = useState(false);
   const [deleteExiting, setDeleteExiting] = useState(false);
@@ -618,7 +617,7 @@ export function MainWindow({
         ]);
         if (cancelled) return;
         setSettingsConfig(loadedConfig);
-        setSavedNotesDir(loadedConfig.notesDir);
+        setSavedDataDir(loadedConfig.dataDir);
         setViewMode(normalizeViewMode(loadedConfig.defaultViewMode));
         setNotes(loadedNotes);
         setCategories(loadedCategories);
@@ -1115,19 +1114,27 @@ export function MainWindow({
     try {
       const config = await getConfig();
       setSettingsConfig(config);
-      setSavedNotesDir(config.notesDir);
+      setSavedDataDir(config.dataDir);
       setViewMode(normalizeViewMode(config.defaultViewMode));
     } catch (error) {
       showToast(getErrorMessage(error));
     }
   };
 
-  const handleChooseNotesDir = async () => {
+  const handleMigrateDataDir = async () => {
     if (!settingsConfig) return;
     try {
-      const notesDir = await chooseNotesDirectory();
-      if (!notesDir) return;
-      handleSettingsChange({ ...settingsConfig, notesDir });
+      const dir = await chooseDataDirectory();
+      if (!dir) return;
+      const savedConfig = await migrateDataDir(dir);
+      setSettingsConfig(savedConfig);
+      setSavedDataDir(savedConfig.dataDir);
+      const loadedNotes = await refreshNotes();
+      if (loadedNotes[0]) {
+        await loadNote(loadedNotes[0].id);
+      } else {
+        clearCurrentNote();
+      }
     } catch (error) {
       showToast(getErrorMessage(error));
     }
@@ -1141,7 +1148,7 @@ export function MainWindow({
         clearTimeout(settingsSaveTimer.current);
       }
       settingsSaveTimer.current = setTimeout(async () => {
-        const previousNotesDir = savedNotesDir ?? nextConfig.notesDir;
+        const previousDataDir = savedDataDir ?? nextConfig.dataDir;
         const normalizedConfig = {
           ...nextConfig,
           defaultViewMode: normalizeViewMode(nextConfig.defaultViewMode),
@@ -1150,10 +1157,10 @@ export function MainWindow({
         try {
           const savedConfig = await saveConfig(normalizedConfig);
           setSettingsConfig(savedConfig);
-          setSavedNotesDir(savedConfig.notesDir);
+          setSavedDataDir(savedConfig.dataDir);
           setViewMode(normalizeViewMode(savedConfig.defaultViewMode));
 
-          if (savedConfig.notesDir !== previousNotesDir) {
+          if (savedConfig.dataDir !== previousDataDir) {
             const loadedNotes = await refreshNotes();
             if (loadedNotes[0]) {
               await loadNote(loadedNotes[0].id);
@@ -1166,7 +1173,7 @@ export function MainWindow({
         }
       }, 300);
     },
-    [savedNotesDir, refreshNotes, loadNote, clearCurrentNote],
+    [savedDataDir, refreshNotes, loadNote, clearCurrentNote],
   );
 
   const handleSettingsChange = useCallback(
@@ -2733,7 +2740,7 @@ export function MainWindow({
                 <SettingsPanel
                   config={settingsConfig}
                   onChange={handleSettingsChange}
-                  onChooseNotesDir={() => void handleChooseNotesDir()}
+                  onMigrateDataDir={() => void handleMigrateDataDir()}
                   onClose={handleCloseSettings}
                 />
               ) : null}

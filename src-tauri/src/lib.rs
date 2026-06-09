@@ -164,12 +164,12 @@ fn images_save_from_path(note_id: String, file_path: String) -> Result<String, A
 fn images_get_base_dir() -> Result<String, AppError> {
     let store = default_store()?;
     store
-        .base_dir()
+        .data_dir()
         .to_str()
         .map(str::to_string)
         .ok_or_else(|| AppError {
             code: "path".into(),
-            message: "invalid base dir path".into(),
+            message: "invalid data dir path".into(),
             details: Default::default(),
         })
 }
@@ -196,7 +196,7 @@ fn copy_background_image(_app: AppHandle, source_path: String) -> Result<String,
     }
 
     let store = default_store()?;
-    let dir = store.base_dir().join("backgrounds");
+    let dir = store.data_dir().join("backgrounds");
     fs::create_dir_all(&dir)?;
 
     let old_config = store.load_config()?;
@@ -242,6 +242,21 @@ fn config_save(app: AppHandle, config: AppConfig) -> Result<AppConfig, AppError>
     }
     let _ = app.emit("config-changed", &saved);
     Ok(saved)
+}
+
+#[tauri::command]
+fn config_migrate_data_dir(app: AppHandle, new_data_dir: String) -> Result<AppConfig, AppError> {
+    let store = default_store()?;
+    let new_path = PathBuf::from(&new_data_dir).join("floral");
+    let new_store = store.migrate_data_to(&new_path)?;
+
+    let scope = app.asset_protocol_scope();
+    let _ = scope.allow_directory(new_path.join("images"), true);
+    let _ = scope.allow_directory(new_path.join("backgrounds"), true);
+
+    let config = new_store.load_config()?;
+    let _ = app.emit("config-changed", &config);
+    Ok(config)
 }
 
 #[tauri::command]
@@ -392,10 +407,10 @@ pub fn run() {
         }))
         .setup(|app| {
             if let Ok(store) = default_store() {
-                let base = store.base_dir();
+                let data = store.data_dir();
                 let scope = app.asset_protocol_scope();
-                let _ = scope.allow_directory(base.join("images"), true);
-                let _ = scope.allow_directory(base.join("backgrounds"), true);
+                let _ = scope.allow_directory(data.join("images"), true);
+                let _ = scope.allow_directory(data.join("backgrounds"), true);
             }
             let updater_state = updater::UpdaterState::new(app.package_info().version.to_string());
             if let Err(error) = updater_state.initialize() {
@@ -431,6 +446,7 @@ pub fn run() {
             config_get,
             copy_background_image,
             config_save,
+            config_migrate_data_dir,
             global_shortcut_check,
             start_shortcut_recording,
             stop_shortcut_recording,

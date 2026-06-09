@@ -221,7 +221,7 @@
       "zhCN": "简体中文",
       "zhHK": "繁體中文"
     },
-    "notesDir": "Notes directory",
+    "dataDir": "Data directory",
     "openAtCursor": "Open near cursor with shortcut",
     "quickNoteShortcut": "Quick Note shortcut",
     "rememberSurfaceSize": "Remember surface size",
