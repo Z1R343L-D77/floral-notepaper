@@ -170,6 +170,11 @@
       "clear": "Clear"
     },
     "emptyState": "No notes available",
+    "search": {
+      "clear": "Clear search",
+      "noResults": "No matching notes",
+      "placeholder": "Search notes…"
+    },
     "error": {
       "copyUnsupported": "Copy is not supported in this environment"
     },

@@ -170,6 +170,11 @@
       "clear": "清空"
     },
     "emptyState": "还没有可打开的笔记",
+    "search": {
+      "clear": "清空搜索",
+      "noResults": "没有匹配的笔记",
+      "placeholder": "搜索笔记…"
+    },
     "error": {
       "copyUnsupported": "当前环境不支持复制"
     },

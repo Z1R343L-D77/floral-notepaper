@@ -170,6 +170,11 @@
       "clear": "清除"
     },
     "emptyState": "還沒有可開啟的筆記",
+    "search": {
+      "clear": "清除搜尋",
+      "noResults": "沒有符合的筆記",
+      "placeholder": "搜尋筆記…"
+    },
     "error": {
       "copyUnsupported": "目前環境不支援複製"
     },
